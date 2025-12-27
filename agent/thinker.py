@@ -45,6 +45,7 @@ class Thinker:
 
     def _load_prompt_template(self):
         if not self.prompt_path.exists():
+            # Fallback if file is missing, though file creation is preferred
             raise FileNotFoundError(f"Thinker prompt not found at {self.prompt_path}")
         with open(self.prompt_path, "r", encoding="utf-8") as f:
             self.system_prompt_template = f.read()
@@ -167,6 +168,21 @@ class Thinker:
             if not data:
                 raise ValueError("LLM returned empty JSON.")
             
+            # --- CRITICAL FIX: Sanitize Action Enums ---
+            # LLMs sometimes hallucinate actions like 'refine', 'summarize' or 'analyze'.
+            # We catch these before Pydantic validation and force them to 'reason'.
+            if "reasoning_traces" in data and isinstance(data["reasoning_traces"], list):
+                valid_actions = {a.value for a in ActionType}
+                for trace in data["reasoning_traces"]:
+                    if isinstance(trace, dict):
+                        # Normalize to lower case string
+                        current_action = str(trace.get("action", "")).lower()
+                        
+                        if current_action not in valid_actions:
+                            logger.warning(f"Sanitizing invalid Thinker action '{current_action}' to 'reason'")
+                            # Map to safe fallback
+                            trace["action"] = ActionType.REASON.value
+
             return ThinkerOutput.model_validate(data)
 
         except Exception as e:

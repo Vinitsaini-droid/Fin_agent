@@ -58,7 +58,7 @@ class MetaAgent:
         self.system_base = ""
         try:
             # Assuming system_base.txt is in the project root based on context
-            base_path = project_root / "system_base.txt"
+            base_path = project_root / "prompts" / "system_base.txt"
             if base_path.exists():
                 with open(base_path, "r", encoding="utf-8") as f:
                     self.system_base = f.read().strip()

@@ -2,6 +2,7 @@
 import time
 import uuid
 import sys
+import json
 from typing import List, Optional, Dict
 from pathlib import Path
 
@@ -32,7 +33,7 @@ class MemoryManager:
     Hybrid Memory System:
     1. Short-Term (RAM): Linear context.
     2. Long-Term (Pinecone): Episodic archival & Semantic Facts.
-    3. Profile (Pinecone): User personality (Persistent across clears unless reset).
+    3. Profile (Pinecone): User personality.
     """
     NAMESPACE = "memory_store"
 
@@ -44,11 +45,9 @@ class MemoryManager:
         self._active_context: Dict[str, List[Dict[str, str]]] = {}
      
     def get_profile(self, user_id: str) -> UserProfileSchema:
-        """Retrieves the user profile."""
         return self.profile_store.get_profile(user_id)
 
-    def get_immediate_context(self, user_id: str, window_size: int = 6) -> str:
-        """Retrieves last N messages for context window."""
+    def get_immediate_context(self, user_id: str, window_size: int = 4) -> str:
         history = self._active_context.get(user_id, [])
         if not history:
             return ""
@@ -62,12 +61,12 @@ class MemoryManager:
         return "\n".join(formatted_context)
 
     def clear_chat_history(self, user_id: str) -> bool:
-        """Resets the SESSION (Episodic), but PRESERVES the PROFILE/FACTS."""
         if user_id in self._active_context:
             del self._active_context[user_id]
 
         if not index: return False
         try:
+            # Strictly scoped deletion
             index.delete(
                 filter={"user_id": {"$eq": user_id}, "type": {"$eq": "episodic"}},
                 namespace=self.NAMESPACE
@@ -78,21 +77,23 @@ class MemoryManager:
             return False
 
     def reset_memory(self, user_id: str) -> bool:
-        """NUCLEAR OPTION: Deletes EVERYTHING about the user."""
         success = True
         if user_id in self._active_context:
             del self._active_context[user_id]
 
         if index: 
             try:
+                # Strictly scoped deletion
                 index.delete(
                     filter={"user_id": {"$eq": user_id}},
                     namespace=self.NAMESPACE
                 )
-                logger.warning(f"Full memory reset (Vectors) performed for user: {user_id}")
+                logger.warning(f"Full memory reset performed for user: {user_id}")
             except Exception as e:
                 logger.error(f"Failed to reset memory vectors: {e}")
                 success = False
+        # 2. Delete Profile from Persistence
+        self.profile_store.delete_profile(user_id)
         
         try:
             clear_cache()
@@ -102,22 +103,36 @@ class MemoryManager:
         return success
 
     def add_memory(self, content: str, memory_type: MemoryType, metadata: dict = None) -> Optional[str]:
-        """Stores memory in Pinecone."""
+        """
+        Stores memory in Pinecone.
+        ENFORCES user isolation: Checks if user_id is missing for user-specific memory types.
+        """
         if not index or not content: return None
+        
+        safe_meta = metadata or {}
+        
+        # --- Strict Isolation Check ---
+        # If storing facts or episodes, user_id is MANDATORY to prevent global leakage.
+        if memory_type in [MemoryType.FACT, MemoryType.EPISODIC]:
+            if "user_id" not in safe_meta:
+                logger.error(f"Attempted to store {memory_type} without 'user_id'. Aborting to prevent global pollution.")
+                return None
+
         try:
             vector = get_embedding(content)
             if not vector: return None
             
-            import json 
             mem_id = str(uuid.uuid4())
             pinecone_meta = {
                 "text": content,
                 "type": memory_type.value,
                 "timestamp": str(time.time()),
-                "attributes_json": json.dumps(metadata or {})
+                "attributes_json": json.dumps(safe_meta) # Store original metadata as JSON string
             }
-            if metadata and "user_id" in metadata:
-                pinecone_meta["user_id"] = metadata["user_id"]
+            
+            # Lift user_id to top-level metadata for filtering
+            if "user_id" in safe_meta:
+                pinecone_meta["user_id"] = safe_meta["user_id"]
 
             index.upsert(
                 vectors=[{"id": mem_id, "values": vector, "metadata": pinecone_meta}],
@@ -130,14 +145,14 @@ class MemoryManager:
 
     def retrieve_relevant(self, query: str, user_id: str, limit: int = 5, memory_type: Optional[MemoryType] = None, score_threshold: float = 0.70) -> List[MemoryItem]:
         """
-        Semantic Retrieval.
-        Updated to accept a custom score_threshold (default 0.70).
+        Semantic Retrieval with STRICT user_id filtering.
         """
         if not index or not query: return []
         try:
             query_vector = get_embedding(query)
             if not query_vector: return []
 
+            # Always filter by user_id
             filter_dict = {"user_id": user_id}
             if memory_type: filter_dict["type"] = memory_type.value
 
@@ -148,10 +163,12 @@ class MemoryManager:
 
             memories = []
             for match in results.get('matches', []):
-                # FIX: Use the dynamic threshold instead of hardcoded 0.70
                 if match.score < score_threshold: continue
                 
-                meta = match.metadata
+                # Handle object vs dict metadata
+                meta = getattr(match, "metadata", None) or match.get("metadata", {})
+                
+                # Retrieve nested attributes
                 attr = safe_json_load(meta.get("attributes_json", "{}")) or {}
 
                 memories.append(MemoryItem(
@@ -167,7 +184,6 @@ class MemoryManager:
             return []
 
     def check_and_update_profile_pre_planning(self, user_id: str, user_query: str):
-        """PRE-PLANNING HOOK: Analyzes query for explicit profile updates."""
         if not user_query: return 
 
         try:
@@ -193,10 +209,9 @@ class MemoryManager:
             logger.warning(f"Pre-planning profile check failed: {e}")
 
     def process_realtime_interaction(self, user_id: str, user_msg: str, agent_msg: str):
-        """CALLED AFTER EVERY TURN."""
         if not user_msg or not agent_msg: return
 
-        # 1. Update Short-Term Context (RAM)
+        # 1. Update Short-Term Context
         if user_id not in self._active_context:
             self._active_context[user_id] = []
         
@@ -235,7 +250,7 @@ class MemoryManager:
             logger.error(f"Real-time processing failed: {e}")
 
     def consolidate_session(self, user_id: str, conversation_history: List[str]):
-        """End-of-session bulk summarization with STRICT 25-FACT LIMIT."""
+        """End-of-session bulk summarization with STRICT 25-FACT LIMIT and USER SCOPING."""
         if not conversation_history: return
         
         try:
@@ -243,28 +258,29 @@ class MemoryManager:
             chat_data = self.summarizer.summarize(conversation_history)
             if not chat_data.key_facts: return
 
-            # 2. Fetch existing facts (High limit to catch overflow)
-            # FIX: Set threshold to 0.0 to ensure we see ALL facts, preventing accidental deletion.
+            # 2. Fetch existing facts (Strictly scoped to user_id)
             existing_memories = self.retrieve_relevant(
                 query="general user facts", 
                 user_id=user_id, 
                 limit=50, 
                 memory_type=MemoryType.FACT,
-                score_threshold=0.0 
+                score_threshold=0.0 # Fetch ALL candidates
             )
             existing_texts = [m.content for m in existing_memories]
 
-            # 3. Smart Deduplication & Limiting (Max 25 facts returned)
+            # 3. Smart Deduplication
             final_facts = self.summarizer.deduplicate_facts(existing_texts, chat_data.key_facts)
 
-            # 4. Replace Strategy: Delete OLD facts, Insert FINAL set
+            # 4. Replace Strategy: Delete OLD facts (Scoped to User), Insert FINAL set
             if index:
+                # CRITICAL: Scope deletion to this user only
                 index.delete(
                     filter={"user_id": {"$eq": user_id}, "type": {"$eq": "fact"}},
                     namespace=self.NAMESPACE
                 )
                 
                 for fact in final_facts:
+                    # add_memory now enforces user_id presence
                     self.add_memory(fact, MemoryType.FACT, {"user_id": user_id})
                 
                 logger.info(f"Consolidated facts for {user_id}. Final count: {len(final_facts)}")

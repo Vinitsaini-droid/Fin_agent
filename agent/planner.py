@@ -152,6 +152,32 @@ class Planner:
             
             data = safe_json_load(response_text)
             if not data: raise ValueError("Empty model response")
+
+            # --- CRITICAL FIX: Sanitize Action Enums ---
+            # Ensures LLM output matches ActionType(str, Enum) values exactly
+            if "steps" in data and isinstance(data["steps"], list):
+                for step in data["steps"]:
+                    if "action" in step and isinstance(step["action"], str):
+                        raw_action = step["action"].lower().strip()
+                        
+                        # Direct Map
+                        if raw_action in ["retrieve", "search", "lookup", "find"]:
+                            step["action"] = "retrieve"
+                        elif raw_action in ["reason", "analyze", "think", "calc"]:
+                            step["action"] = "reason"
+                        elif raw_action in ["clarify", "ask", "question"]:
+                            step["action"] = "clarify"
+                        elif raw_action in ["verify", "check", "audit"]:
+                            step["action"] = "verify"
+                        elif raw_action in ["refuse", "deny", "reject"]:
+                            step["action"] = "refuse"
+                        else:
+                            # Smart Fallback: If totally unknown, default to RETRIEVE
+                            # This prevents the agent from crashing on a made-up action
+                            logger.warning(f"Sanitizing unknown action '{raw_action}' to 'retrieve'")
+                            step["action"] = "retrieve"
+            # ---------------------------------------------
+            
             return PlanSchema.model_validate(data)
             
         except Exception as e:

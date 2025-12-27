@@ -93,6 +93,24 @@ class Verifier:
             if not data:
                 raise ValueError("Verifier returned empty JSON.")
 
+            # --- CRITICAL FIX: Sanitize Verification Status ---
+            # Maps inconsistent LLM capitalization/synonyms to strict Enum values
+            if "verification_status" in data and isinstance(data["verification_status"], str):
+                raw_status = data["verification_status"].upper().strip()
+                
+                # Standard Mappings
+                if raw_status in ["PASS", "VALID", "TRUE", "CORRECT", "APPROVED"]:
+                    data["verification_status"] = "PASS"
+                elif raw_status in ["FAIL", "INVALID", "FALSE", "INCORRECT", "REJECTED"]:
+                    data["verification_status"] = "FAIL"
+                elif raw_status in ["FLAG", "UNCERTAIN", "WARN", "REVIEW"]:
+                    data["verification_status"] = "FLAG"
+                else:
+                    # Smart Fallback: If status is unknown, it requires human/safety review -> FLAG
+                    logger.warning(f"Sanitizing unknown status '{raw_status}' to 'FLAG'")
+                    data["verification_status"] = "FLAG"
+            # --------------------------------------------------
+
             report = VerificationReport(**data)
             
             # Log Result
