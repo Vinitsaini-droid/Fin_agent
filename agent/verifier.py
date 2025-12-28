@@ -87,7 +87,7 @@ class Verifier:
 
         # 2. Inject into Prompt
         # Prepend System Base to the Verifier Template
-        combined_template = f"{self.system_base}\n\n{self.template}"
+        combined_template = f"{self.template}\n\n{self.system_base}"
         system_prompt = combined_template
         
         system_prompt = system_prompt.replace("{USER_QUERY}", user_query)

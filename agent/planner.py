@@ -54,7 +54,7 @@ class Planner:
         
         with open(self.prompt_path, "r", encoding="utf-8") as f:
             # Prepend base prompt to the planner prompt
-            self.system_prompt_template = base_content + f.read()
+            self.system_prompt_template = f.read() + base_content
 
     def generate_plan(
         self, 

@@ -131,7 +131,7 @@ class Explainer:
 
         # --- Prompt Population ---
         # Prepend System Base to the Explainer Template
-        combined_template = f"{self.system_base}\n\n{self.system_prompt_template}"
+        combined_template = f"{self.system_prompt_template}\n\n{self.system_base}"
         system_prompt = combined_template
         
         system_prompt = system_prompt.replace("{USER_QUERY}", user_query)
